@@ -1,10 +1,13 @@
 # Google Gemini cloned voice (voices.create type="replicated").
-# To use: record yourself to voices/audio/me.wav (gitignored: personal data), then
+# To use: record yourself to voices/audio/me.wav and record a short consent statement
+# (e.g. "I consent to my voice being cloned") to voices/audio/me-consent.wav.
+# voices/audio/ is gitignored: recordings are personal data. Then
 #   cp voices/me-clone.yaml.example voices/me-clone.yaml
 # and run: vp tts --voice me-clone --text "Hello from my clone"
 name: me-clone
 provider: google
 type: cloned
 reference_audio: voices/audio/me.wav
+consent_audio: voices/audio/me-consent.wav   # required by Google voice replication
 store: false   # stateless voicekey_ (7 days) instead of a stored voice_ (1 year)
 language: en-US

@@ -149,6 +149,7 @@ def test_committed_clone_example_is_valid_but_not_loaded(voices_dir: Path) -> No
     cfg = load_voice("me-clone", voices_dir)
     assert isinstance(cfg, ClonedVoiceConfig)
     assert cfg.provider == "google"
+    assert cfg.consent_audio == "voices/audio/me-consent.wav"
 
 
 # --- config hash -------------------------------------------------------------------------
@@ -177,6 +178,38 @@ def test_config_hash_tracks_reference_audio_content(tmp_path: Path) -> None:
     assert config_hash(cfg, root=tmp_path) == first
     audio.write_bytes(b"two")
     assert config_hash(cfg, root=tmp_path) != first
+
+
+def test_config_hash_tracks_consent_audio(tmp_path: Path) -> None:
+    (tmp_path / "me.wav").write_bytes(b"ref")
+    consent = tmp_path / "consent.wav"
+    consent.write_bytes(b"one")
+    plain = ClonedVoiceConfig(name="c", provider="google", reference_audio=Path("me.wav"))
+    cfg = ClonedVoiceConfig(
+        name="c", provider="google", reference_audio=Path("me.wav"), consent_audio="consent.wav"
+    )
+    first = config_hash(cfg, root=tmp_path)
+    assert first != config_hash(plain, root=tmp_path)
+    assert config_hash(cfg, root=tmp_path) == first
+    consent.write_bytes(b"two")
+    assert config_hash(cfg, root=tmp_path) != first
+
+
+def test_resolve_cloned_checks_consent_audio(
+    voices_dir: Path, cache: VoiceCache, tmp_path: Path
+) -> None:
+    (tmp_path / "me.wav").write_bytes(b"ref")
+    path = write(
+        voices_dir,
+        "me",
+        "name: me\nprovider: fake\ntype: cloned\nreference_audio: me.wav\n"
+        "consent_audio: consent.wav\n",
+    )
+    with pytest.raises(ConfigError, match="consent_audio not found") as excinfo:
+        resolve_voice("me", None, voices_dir=voices_dir, cache=cache, root=tmp_path)
+    assert str(path) in str(excinfo.value)
+    (tmp_path / "consent.wav").write_bytes(b"yes")
+    assert resolve_voice("me", None, voices_dir=voices_dir, cache=cache, root=tmp_path)[2]
 
 
 # --- cache -------------------------------------------------------------------------------

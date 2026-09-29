@@ -434,6 +434,31 @@ def test_create_voice_uses_server_expire_time(provider: GoogleProvider, client: 
     assert created.expires_at == expire
 
 
+def test_create_cloned_voice_consent_field_wins_over_provider_options(
+    provider: GoogleProvider, client: MagicMock, tmp_path: Path
+) -> None:
+    source = tmp_path / "me.wav"
+    source.write_bytes(b"source-audio")
+    consent = tmp_path / "consent.wav"
+    consent.write_bytes(b"first-class-consent")
+    legacy = tmp_path / "legacy.wav"
+    legacy.write_bytes(b"legacy-consent")
+    client.voices.create.return_value = _created(id="voice_rep")
+    cfg = ClonedVoiceConfig(
+        name="me",
+        reference_audio=source,
+        consent_audio=str(consent),
+        provider_options={"consent_audio": str(legacy)},
+    )
+    provider.create_voice(cfg)
+    voice = client.voices.create.call_args.kwargs["voice"]
+    assert voice["replicated"]["consent_audio"] == {
+        "mime_type": "audio/wav",
+        "data": base64.b64encode(b"first-class-consent").decode(),
+    }
+    assert "consent_audio" not in voice  # provider_options.consent_audio is not a voice field
+
+
 def test_create_cloned_voice_requires_consent(
     provider: GoogleProvider, client: MagicMock, tmp_path: Path
 ) -> None:

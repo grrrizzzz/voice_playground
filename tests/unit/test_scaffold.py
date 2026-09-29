@@ -104,10 +104,16 @@ def test_help_lists_enum_choices() -> None:
         assert choice in tts_help
 
 
-def test_unimplemented_command_fails_cleanly() -> None:
+def test_unexpected_error_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # T8 implemented the service; an unexpected exception still exits 1 with one line.
+    def boom(**_: object) -> None:
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr("voice_playground.service.run_tts", boom)
     result = runner.invoke(app, ["tts", "--provider", "fake", "--text", "hi"])
     assert result.exit_code == 1
-    assert "not implemented yet" in result.output
+    assert result.output.strip().startswith("error: unexpected RuntimeError: kaboom")
+    assert len(result.output.strip().splitlines()) == 1
 
 
 def test_providers_command_shows_key_status_never_key(monkeypatch: pytest.MonkeyPatch) -> None:

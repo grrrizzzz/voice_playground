@@ -87,6 +87,7 @@ voice: Kore                    # prebuilt: provider voice name/id
 description: >-                # designed: natural-language voice description
   Warm, engaging narrator with a slight British accent
 reference_audio: voices/audio/me.wav   # cloned: path relative to repo root
+consent_audio: voices/audio/me-consent.wav   # cloned, optional: consent recording (required by google)
 store: true                    # google: stateful voice_ (1y) vs stateless voicekey_ (7d)
 style: "calm, measured audiobook delivery"   # google speech_metadata.style / openai instructions
 language: en-US
@@ -97,12 +98,12 @@ provider_options: {}           # passed through as-is (e.g. elevenlabs stability
 - Remote ids of created voices go in `.vp_cache/voices.json` (gitignored). Each entry is keyed by `name` and stores `{provider, remote_id, config_hash, created_at, expires_at}`. If the config hash changes, the voice is stale: warn and recreate on next use (with `--force` behavior).
 - `voices/audio/` is gitignored because reference recordings are personal data. Commit example configs only.
 
-### Capability matrix (the first provider tasks must fill this in; agents verify every model ID against current docs)
-| Provider | TTS models (default first) | STT models | prebuilt | designed | cloned |
-|---|---|---|---|---|---|
-| google | `gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts`, `gemini-3.1-flash-tts-preview` | current Gemini Flash multimodal model (audio understanding, verify ID) | ✅ | ✅ `voices.create(type="prompted")` | ✅ `voices.create(type="replicated")` |
-| openai | `gpt-4o-mini-tts` (supports `instructions`), `tts-1`, `tts-1-hd` | `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1` (+ newer if present) | ✅ | ❌ → `UnsupportedCapability` | ❌ → `UnsupportedCapability` |
-| elevenlabs | `eleven_v3`, `eleven_multilingual_v2`, `eleven_flash_v2_5` | `scribe_v1` / latest Scribe | ✅ | ✅ Voice Design | ✅ Instant Voice Clone |
+### Capability matrix (verified by T2–T4 against current provider docs; updated in T8)
+| Provider | TTS models (default first) | STT models (default first) | prebuilt | designed | cloned | library |
+|---|---|---|---|---|---|---|
+| google | `gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts`, `gemini-3.1-flash-tts-preview` | `gemini-3.8-flash` (audio understanding) | ✅ | ✅ `voices.create(type="prompted")` | ✅ `voices.create(type="replicated")`; **requires a consent recording** (`consent_audio`) | ✅ `voices.list` |
+| openai | `gpt-4o-mini-tts` (supports `instructions`), `tts-1`, `tts-1-hd` | `gpt-transcribe`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `gpt-4o-transcribe-diarize`, `whisper-1` | ✅ | ❌ → `UnsupportedCapability` | ❌ → `UnsupportedCapability` | ✅ static list of built-in voices |
+| elevenlabs | `eleven_v3`, `eleven_multilingual_v2`, `eleven_flash_v2_5` | `scribe_v2` | ✅ | ✅ Voice Design | ✅ Instant Voice Clone | ✅ `voices.search` |
 
 ---
 

@@ -87,12 +87,15 @@ class DesignedVoiceConfig(_VoiceConfigBase):
 class ClonedVoiceConfig(_VoiceConfigBase):
     """A voice cloned remotely from `reference_audio` (path relative to the repo root = cwd).
 
-    The file's existence is checked when the voice is resolved, not when the config loads,
-    so `vp voices list` works without the (gitignored) personal recording.
+    `consent_audio` is an optional recording of the speaker consenting to the clone (Google
+    voice replication requires it; other providers ignore it). The files' existence is
+    checked when the voice is resolved, not when the config loads, so `vp voices list` works
+    without the (gitignored) personal recordings.
     """
 
     type: Literal["cloned"] = "cloned"
     reference_audio: Path
+    consent_audio: str | None = None
     store: bool = True  # google: stateful voice_ (1y) vs stateless voicekey_ (7d)
 
 
@@ -210,9 +213,10 @@ def config_hash(cfg: VoiceConfig, root: Path | None = None) -> str:
     """Stable sha256 of the fields that define a remote voice (detects a stale cache).
 
     Covers `provider`, `type`, `store`, and `description` (designed) or the `reference_audio`
-    path plus a hash of its contents (cloned; `null` if the file is unreadable). `style`,
+    path plus a hash of its contents (cloned; `null` if the file is unreadable), plus the
+    same for `consent_audio` when it is set. `style`,
     `model`, `language`, etc. are applied per request, so changing them does not invalidate
-    the remote voice. `root` resolves relative `reference_audio` paths (default: cwd).
+    the remote voice. `root` resolves relative audio paths (default: cwd).
     """
     payload: dict[str, Any] = {"provider": cfg.provider, "type": cfg.type}
     if isinstance(cfg, DesignedVoiceConfig):
@@ -224,16 +228,24 @@ def config_hash(cfg: VoiceConfig, root: Path | None = None) -> str:
             "reference_audio_sha256": _file_sha256(audio),
             "store": cfg.store,
         }
+        if cfg.consent_audio is not None:
+            consent = _resolve_path(Path(cfg.consent_audio), root)
+            payload |= {
+                "consent_audio": Path(cfg.consent_audio).as_posix(),
+                "consent_audio_sha256": _file_sha256(consent),
+            }
     else:
         payload |= {"voice": cfg.voice}
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _resolve_path(path: Path, root: Path | None) -> Path:
+    return path if path.is_absolute() else (root or Path.cwd()) / path
+
+
 def _audio_path(cfg: ClonedVoiceConfig, root: Path | None) -> Path:
-    if cfg.reference_audio.is_absolute():
-        return cfg.reference_audio
-    return (root or Path.cwd()) / cfg.reference_audio
+    return _resolve_path(cfg.reference_audio, root)
 
 
 # --- cache ---------------------------------------------------------------------------------
@@ -402,10 +414,11 @@ def resolve_voice(
       `ConfigError` (exit 2). If `provider_flag` is None, use the config's provider.
     - prebuilt: `provider_voice` = config `voice`, `needs_create=False`.
     - designed/cloned: a provider is required (config or flag), else `ConfigError`. Cloned
-      `reference_audio` must exist (relative to `root`, default cwd), else `ConfigError`
-      naming the voice file. If the cache holds a valid entry (same provider, same config
-      hash, not expired), `provider_voice` = its remote id and `needs_create=False`. Otherwise
-      `needs_create=True` and `provider_voice` is the empty-string placeholder `""`: the caller
+      `reference_audio` (and `consent_audio`, if set) must exist (relative to `root`, default
+      cwd), else `ConfigError` naming the voice file. If the cache holds a valid entry (same
+      provider, same config hash, not expired), `provider_voice` = its remote id and
+      `needs_create=False`. Otherwise `needs_create=True` and `provider_voice` is the
+      empty-string placeholder `""`: the caller
       creates the voice, calls `cache.record(...)`, and builds the final voice with
       `dataclasses.replace(resolved, provider_voice=remote_id)`. A stale/expired entry warns
       on stderr.
@@ -449,6 +462,13 @@ def resolve_voice(
         if not audio.is_file():
             raise ConfigError(
                 f"voice '{cfg.name}' ({path}): reference_audio not found: {cfg.reference_audio}"
+            )
+        if (
+            cfg.consent_audio is not None
+            and not _resolve_path(Path(cfg.consent_audio), root).is_file()
+        ):
+            raise ConfigError(
+                f"voice '{cfg.name}' ({path}): consent_audio not found: {cfg.consent_audio}"
             )
     entry = cache.get(cfg.name)
     if entry is not None and cache.is_valid(cfg.name, cfg, now, provider=provider, root=root):

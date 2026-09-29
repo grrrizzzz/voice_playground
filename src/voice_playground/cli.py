@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from enum import StrEnum
@@ -9,9 +10,10 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from pydantic import ValidationError
 
 from voice_playground import service
-from voice_playground.errors import VPError
+from voice_playground.errors import ConfigError, VPError
 from voice_playground.settings import Settings, get_settings
 
 app = typer.Typer(
@@ -38,27 +40,82 @@ class AudioFormat(StrEnum):
     pcm = "pcm"
 
 
-def _err(message: str) -> None:
+#: Set by `--debug` (or the VP_DEBUG env var): show tracebacks for unexpected errors.
+_state: dict[str, bool] = {"debug": False}
+
+
+def _debug() -> bool:
+    return _state["debug"] or os.environ.get("VP_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _scrub(message: str, settings: Settings | None) -> str:
+    """Collapse to one line and mask any secret value from settings (defense in depth)."""
+    line = " ".join(message.split())
+    if settings is not None:
+        for secret in (
+            settings.google_api_key,
+            settings.openai_api_key,
+            settings.elevenlabs_api_key,
+            settings.ha_token,
+        ):
+            value = secret.get_secret_value().strip() if secret is not None else ""
+            if value:
+                line = line.replace(value, "***")
+    return line
+
+
+def _err(message: str, settings: Settings | None = None) -> None:
     """Print a one-line error on stderr."""
-    typer.echo(f"error: {' '.join(message.split())}", err=True)
+    typer.echo(f"error: {_scrub(message, settings)}", err=True)
 
 
 @contextmanager
-def _errors() -> Iterator[None]:
-    """Map expected errors to one-line stderr messages and exit codes (§2 rule 7)."""
+def _errors(settings: Settings | None = None) -> Iterator[None]:
+    """Map errors to one-line stderr messages and exit codes (§2 rule 7).
+
+    `VPError` -> its exit code. Ctrl-C -> exit 130 quietly. Anything else -> exit 1 with a
+    one-line message (full traceback with `--debug` / VP_DEBUG=1).
+    """
     try:
         yield
     except VPError as exc:
-        _err(str(exc))
+        _err(str(exc), settings)
         raise typer.Exit(exc.exit_code) from None
-    except NotImplementedError as exc:
-        _err(f"not implemented yet: {exc}")
+    except KeyboardInterrupt:
+        raise typer.Exit(130) from None
+    except Exception as exc:
+        if _debug():
+            raise
+        _err(f"unexpected {type(exc).__name__}: {exc} (rerun with --debug for details)", settings)
         raise typer.Exit(1) from None
+
+
+def _load_settings() -> Settings:
+    try:
+        return get_settings()
+    except ValidationError as exc:
+        # Only field names and messages: never echo input values (they could be secrets).
+        problems = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
+        )
+        raise ConfigError(f"invalid settings in environment/.env: {problems}") from None
 
 
 def _run[T](fn: Callable[[Settings], T]) -> T:
     with _errors():
-        return fn(get_settings())
+        settings = _load_settings()
+    with _errors(settings):
+        return fn(settings)
+
+
+@app.callback()
+def main(
+    debug: Annotated[
+        bool, typer.Option("--debug", help="Show full tracebacks for unexpected errors.")
+    ] = False,
+) -> None:
+    """Try out text-to-speech and speech-to-text models from different providers."""
+    _state["debug"] = debug
 
 
 # --- shared option types -----------------------------------------------------------------

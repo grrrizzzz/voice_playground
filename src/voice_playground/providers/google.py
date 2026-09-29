@@ -337,11 +337,12 @@ class GoogleProvider(BaseProvider):
             voice["prompted"] = {"input": cfg.description}
         elif cfg.type == "cloned":
             voice = self._voice_input(cfg, "replicated")
-            consent = cfg.provider_options.get("consent_audio")
+            # First-class field first; `provider_options.consent_audio` is a legacy fallback.
+            consent = cfg.consent_audio or cfg.provider_options.get("consent_audio")
             if not consent:
                 raise ConfigError(
                     f"voice '{cfg.name}': google voice replication needs a consent recording; "
-                    "set provider_options.consent_audio to its path"
+                    "set consent_audio in the voice config to its path"
                 )
             voice["replicated"] = {
                 "source_audio": self._audio_data(Path(cfg.reference_audio)),
