@@ -1,0 +1,66 @@
+[project]
+name = "voice-playground"
+version = "0.1.0"
+description = "A CLI for trying out TTS/STT models from Google Gemini, OpenAI, and ElevenLabs"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "elevenlabs>=2.70.0",
+    "google-genai>=2.25.0",
+    "httpx>=0.28.1",
+    "openai>=3.20.0",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "python-dotenv>=1.2.3",
+    "pyyaml>=6.0.3",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+vp = "voice_playground.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voice_playground"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Ruff also formats Markdown code blocks; the docs (PLAN.md etc.) are not ruff-managed.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer declares CLI options via default-argument function calls.
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+mypy_path = "src"
+packages = ["voice_playground"]
+
+[[tool.mypy.overrides]]
+module = "voice_playground.*"
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: hits a real provider API; skipped unless the matching *_API_KEY is set",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-mock>=3.16.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.9",
+    "types-pyyaml>=6.0.12.20260906",
+]
