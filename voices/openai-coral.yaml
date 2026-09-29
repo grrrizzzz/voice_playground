@@ -1,0 +1,8 @@
+# OpenAI built-in voice. `style` becomes `instructions` on models that support it
+# (gpt-4o-mini-tts).
+name: openai-coral
+provider: openai
+model: gpt-4o-mini-tts
+type: prebuilt
+voice: coral
+style: "cheerful and upbeat, like a friendly podcast host"

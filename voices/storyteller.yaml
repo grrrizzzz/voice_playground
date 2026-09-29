@@ -1,0 +1,11 @@
+# Google Gemini designed voice, created remotely from the description on first use
+# (voices.create type="prompted"); the remote id is cached in .vp_cache/voices.json.
+name: storyteller
+provider: google
+type: designed
+description: >-
+  Warm, engaging storyteller with a slight British accent, mid-range pitch,
+  and a gentle, unhurried pace
+store: true
+style: "cozy bedtime story, softly animated"
+language: en-GB

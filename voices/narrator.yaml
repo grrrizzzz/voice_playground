@@ -1,0 +1,10 @@
+# Google Gemini prebuilt voice with a delivery style.
+# Use: vp tts --voice narrator --text "Once upon a time..."
+name: narrator
+provider: google
+model: gemini-3.8-flash-tts
+type: prebuilt
+voice: Kore
+style: "calm, measured audiobook delivery"
+language: en-US
+sample_rate: 24000

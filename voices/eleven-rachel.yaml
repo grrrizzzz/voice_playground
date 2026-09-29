@@ -1,0 +1,11 @@
+# ElevenLabs premade voice "Rachel" (voice_id 21m00Tcm4TlvDq8ikWAM).
+# provider_options map to ElevenLabs voice settings.
+name: eleven-rachel
+provider: elevenlabs
+model: eleven_multilingual_v2
+type: prebuilt
+voice: 21m00Tcm4TlvDq8ikWAM
+provider_options:
+  stability: 0.5
+  similarity_boost: 0.75
+  speed: 1.0

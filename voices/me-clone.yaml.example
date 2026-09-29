@@ -1,0 +1,10 @@
+# Google Gemini cloned voice (voices.create type="replicated").
+# To use: record yourself to voices/audio/me.wav (gitignored: personal data), then
+#   cp voices/me-clone.yaml.example voices/me-clone.yaml
+# and run: vp tts --voice me-clone --text "Hello from my clone"
+name: me-clone
+provider: google
+type: cloned
+reference_audio: voices/audio/me.wav
+store: false   # stateless voicekey_ (7 days) instead of a stored voice_ (1 year)
+language: en-US
