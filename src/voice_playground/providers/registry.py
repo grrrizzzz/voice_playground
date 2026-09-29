@@ -1,7 +1,9 @@
 """Provider registry: name -> lazy import path.
 
 Imports are lazy so a missing SDK or API key only breaks that one provider.
-To add a provider: create `providers/<name>.py` and add one line to `PROVIDERS`.
+To add a provider: create `providers/<name>.py` and add one line to `PROVIDERS`. Everything
+else (API key env var, default voice) is declared on the provider class itself
+(`BaseProvider.api_key_env`, `BaseProvider.default_voice`).
 """
 
 from __future__ import annotations
@@ -20,14 +22,6 @@ PROVIDERS: dict[str, str] = {
     "openai": "voice_playground.providers.openai:OpenAIProvider",
     "elevenlabs": "voice_playground.providers.elevenlabs:ElevenLabsProvider",
     "fake": "voice_playground.providers.fake:FakeProvider",
-}
-
-#: Env var holding each provider's API key (None = no key needed).
-API_KEY_ENV: dict[str, str | None] = {
-    "google": "GOOGLE_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "elevenlabs": "ELEVENLABS_API_KEY",
-    "fake": None,
 }
 
 
@@ -52,6 +46,16 @@ def get_provider_class(name: str) -> type[Provider]:
     except ImportError as exc:
         raise ProviderError(f"provider '{name}' is unavailable: {exc}") from exc
     return cast("type[Provider]", getattr(module, attr))
+
+
+def api_key_env(name: str) -> str | None:
+    """Env var holding provider `name`'s API key (class attribute `api_key_env`), or None."""
+    return cast("str | None", getattr(get_provider_class(name), "api_key_env", None))
+
+
+def default_voice(name: str) -> str | None:
+    """Voice used when `vp tts` gets no `--voice` (class attribute `default_voice`), or None."""
+    return cast("str | None", getattr(get_provider_class(name), "default_voice", None))
 
 
 def get_provider(name: str, settings: Settings) -> Provider:

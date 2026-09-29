@@ -337,6 +337,14 @@ def _ignored(path: str) -> bool:
         "out/a.wav",
         "x.wav",
         "x.mp3",
+        "voices/me.wav",
+        "sub/clip.m4a",
+        "deep/dir/take.flac",
+        "a/b.ogg",
+        "a/b.aac",
+        "a/b.webm",
+        "a/raw.pcm",
+        "tests/fixtures/sample.mp3",
         ".venv/bin/python",
     ],
 )
@@ -349,3 +357,46 @@ def test_gitignore_ignores(path: str) -> None:
 )
 def test_gitignore_keeps(path: str) -> None:
     assert not _ignored(path)
+
+
+# --- Settings.api_key (generic secret lookup for providers) ------------------------------
+
+
+def test_settings_api_key_uses_declared_field(settings: Settings) -> None:
+    keyed = settings.model_copy(update={"openai_api_key": SecretStr("sk-field")})
+    secret = keyed.api_key("OPENAI_API_KEY")
+    assert secret is not None
+    assert secret.get_secret_value() == "sk-field"
+    assert settings.api_key("OPENAI_API_KEY") is None
+
+
+def test_settings_api_key_undeclared_from_env_and_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "x.env"
+    env_file.write_text("ACME_API_KEY=from-dotenv\nEMPTY_API_KEY=\n")
+    monkeypatch.setenv("VP_ENV_FILE", str(env_file))
+    s = get_settings()
+    secret = s.api_key("ACME_API_KEY")
+    assert secret is not None
+    assert secret.get_secret_value() == "from-dotenv"
+    assert s.api_key("EMPTY_API_KEY") is None
+    assert s.api_key("MISSING_API_KEY") is None
+    monkeypatch.setenv("ACME_API_KEY", "from-env")
+    secret = get_settings().api_key("ACME_API_KEY")
+    assert secret is not None
+    assert secret.get_secret_value() == "from-env"
+    assert "from-env" not in repr(secret)
+
+
+def test_every_provider_declares_key_env_and_default_voice() -> None:
+    expected = {
+        "google": "GOOGLE_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "elevenlabs": "ELEVENLABS_API_KEY",
+        "fake": None,
+    }
+    for name, env in expected.items():
+        cls = get_provider_class(name)
+        assert getattr(cls, "api_key_env", "unset") == env, name
+        assert getattr(cls, "default_voice", None), name

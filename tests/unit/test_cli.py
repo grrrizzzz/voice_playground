@@ -16,6 +16,7 @@ from voice_playground.errors import ProviderError
 from voice_playground.providers.base import AudioResult, CreatedVoice, TTSRequest
 from voice_playground.providers.fake import FakeProvider
 from voice_playground.providers.registry import PROVIDERS
+from voice_playground.settings import Settings
 from voice_playground.voices import VoiceConfig
 
 runner = CliRunner()
@@ -490,3 +491,96 @@ def test_voices_library_with_filters() -> None:
     assert result.stdout.splitlines() == ["fake_tenor\tTenor\tBright fake voice"]
     searched = runner.invoke(app, ["voices", "library", "--provider", "fake", "--search", "warm"])
     assert searched.stdout.splitlines() == ["fake_alto\tAlto\tWarm, low fake voice"]
+
+
+# --- M3: a new provider needs only its module + one registry line --------------------------
+
+ACME_KEY = "acme-SECRET-key-424242"
+
+
+@pytest.fixture
+def acme_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register a provider the way a new module would: a class + one `PROVIDERS` line.
+
+    No `Settings` field, no `API_KEY_ENV`/`DEFAULT_VOICES` entries, no `cli._scrub` edit.
+    """
+    import sys
+    import types
+    from typing import ClassVar
+
+    from voice_playground.providers import registry
+    from voice_playground.providers.base import BaseProvider, Capability
+
+    class AcmeProvider(BaseProvider):
+        name: ClassVar[str] = "acme"
+        capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.TTS})
+        default_tts_model: ClassVar[str | None] = "acme-tts-1"
+        api_key_env: ClassVar[str | None] = "ACME_API_KEY"
+        default_voice: ClassVar[str | None] = "acme-voice"
+
+        def __init__(self, settings: Settings) -> None:
+            super().__init__(settings)
+            self._key = self._require_api_key()
+
+        def tts(self, req: TTSRequest) -> AudioResult:
+            # A careless provider that echoes its key in an error: the CLI must mask it.
+            voice = req.voice.provider_voice
+            raise ProviderError(f"acme rejected key {self._key} for voice {voice}")
+
+    module = types.ModuleType("vp_test_acme")
+    module.__dict__["AcmeProvider"] = AcmeProvider
+    monkeypatch.setitem(sys.modules, "vp_test_acme", module)
+    monkeypatch.setitem(registry.PROVIDERS, "acme", "vp_test_acme:AcmeProvider")
+
+
+@pytest.mark.usefixtures("acme_provider")
+def test_new_provider_key_is_masked_in_cli_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ACME_API_KEY", ACME_KEY)
+    result = runner.invoke(app, ["tts", "--provider", "acme", "--text", "hi"])
+    assert result.exit_code == 1
+    line = one_line_error(result)
+    assert ACME_KEY not in result.output
+    assert "acme rejected key *** for voice acme-voice" in line  # default_voice was used
+
+
+@pytest.mark.usefixtures("acme_provider")
+def test_new_provider_key_read_from_dotenv_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "acme.env"
+    env_file.write_text(f"ACME_API_KEY={ACME_KEY}\n")
+    monkeypatch.setenv("VP_ENV_FILE", str(env_file))
+    result = runner.invoke(app, ["tts", "--provider", "acme", "--text", "hi"])
+    assert result.exit_code == 1
+    assert ACME_KEY not in result.output
+    assert "acme rejected key ***" in one_line_error(result)
+
+
+@pytest.mark.usefixtures("acme_provider")
+def test_new_provider_missing_key_and_providers_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = runner.invoke(app, ["tts", "--provider", "acme", "--text", "hi"])
+    assert result.exit_code == 2
+    assert "ACME_API_KEY is not set" in one_line_error(result)
+    assert "acme: capabilities=[tts]" in runner.invoke(app, ["providers"]).output
+    assert "ACME_API_KEY no" in runner.invoke(app, ["providers"]).output
+    monkeypatch.setenv("ACME_API_KEY", ACME_KEY)
+    out = runner.invoke(app, ["providers"]).output
+    assert "ACME_API_KEY yes" in out
+    assert ACME_KEY not in out
+
+
+def test_scrub_skips_providers_that_fail_to_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    from voice_playground.providers import registry
+
+    monkeypatch.setitem(registry.PROVIDERS, "broken", "vp_no_such_module:Nope")
+    dummy = "dummy-OPENAI-key-555"
+    monkeypatch.setenv("OPENAI_API_KEY", dummy)
+
+    def boom(**_: object) -> None:
+        raise ProviderError(f"failed with {dummy}")
+
+    monkeypatch.setattr("voice_playground.service.run_tts", boom)
+    result = runner.invoke(app, ["tts", "--provider", "fake", "--text", "hi"])
+    assert result.exit_code == 1
+    assert dummy not in result.output
+    assert "failed with ***" in one_line_error(result)

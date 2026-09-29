@@ -353,6 +353,17 @@ def test_create_cloned_voice_missing_file(provider: ElevenLabsProvider, tmp_path
         provider.create_voice(cfg)
 
 
+def test_create_cloned_voice_rejects_non_audio_file(
+    provider: ElevenLabsProvider, client: MagicMock, tmp_path: Path
+) -> None:
+    secret = tmp_path / "credentials.json"
+    secret.write_text("{}")
+    cfg = ClonedVoiceConfig(name="me", reference_audio=secret)
+    with pytest.raises(ConfigError, match="reference_audio must be an audio file"):
+        provider.create_voice(cfg)
+    client.voices.ivc.create.assert_not_called()
+
+
 def test_create_prebuilt_voice_is_config_error(provider: ElevenLabsProvider) -> None:
     with pytest.raises(ConfigError, match="prebuilt"):
         provider.create_voice(PrebuiltVoiceConfig(name="rachel", voice="abc"))

@@ -69,7 +69,7 @@ GOOGLE_API_KEY=
 OPENAI_API_KEY=
 ELEVENLABS_API_KEY=
 
-HA_URL=http://homeassistant.local:8123
+HA_URL=http://homeassistant.local:8123   # prefer https:// unless HA is on a trusted LAN
 HA_TOKEN=                       # long-lived access token
 HA_SONOS_ENTITY=media_player.living_room
 VP_SERVE_HOST=                  # optional: override the detected LAN IP
@@ -95,7 +95,8 @@ sample_rate: 24000
 provider_options: {}           # passed through as-is (e.g. elevenlabs stability, similarity_boost, speed)
 ```
 - Validated with a pydantic model and a discriminated union on `type`. Each type has its own required fields: `voice` for prebuilt, `description` for designed, `reference_audio` for cloned.
-- Remote ids of created voices go in `.vp_cache/voices.json` (gitignored). Each entry is keyed by `name` and stores `{provider, remote_id, config_hash, created_at, expires_at}`. If the config hash changes, the voice is stale: warn and recreate on next use (with `--force` behavior).
+- Remote ids of created voices go in `.vp_cache/voices.json` (gitignored). Each entry is keyed by `name` and stores `{provider, remote_id, config_hash, created_at, expires_at}`. The hash covers every creation-relevant field (`provider`, `type`, `store`, `description`, `model`, `language`, `provider_options`, audio paths + content hashes). If it changes, the voice is stale: warn and recreate on next use (with `--force` behavior). Recreating deletes the replaced remote voice (a failed delete warns with the orphaned id).
+- `reference_audio` / `consent_audio` must have an audio extension (`.wav .mp3 .m4a .flac .ogg .aac .webm`); they may live outside the repo.
 - `voices/audio/` is gitignored because reference recordings are personal data. Commit example configs only.
 
 ### Capability matrix (verified by T2–T4 against current provider docs; updated in T8)
@@ -176,11 +177,11 @@ class Provider(Protocol):
 ```
 Methods a provider doesn't support raise `UnsupportedCapability`. The registry maps names to import strings, e.g. `{"google": "voice_playground.providers.google:GoogleProvider", ...}`, so a missing SDK or key only breaks that one provider.
 
-**To add a provider:** create `providers/<name>.py`, add one line to `registry.py`, add tests. That's all. The README must document this.
+**To add a provider:** create `providers/<name>.py` (a `BaseProvider` subclass that also sets the optional ClassVars `api_key_env` and `default_voice`), add one line to `PROVIDERS` in `registry.py`, add its key to `.env.example`, add tests. That's all: the key is read through `Settings.api_key(env_name)` (no `Settings` field needed), and `vp providers` key status and CLI secret masking derive from `api_key_env`. The README must document this.
 
 ### Sonos / Home Assistant flow (`playback/sonos.py`)
 1. Convert the audio to MP3 (ffmpeg) for the best Sonos compatibility.
-2. Start a `ThreadingHTTPServer` on `0.0.0.0:VP_SERVE_PORT` in a background thread. It serves exactly one file at an unguessable path (`/<secrets.token_urlsafe(16)>.mp3`) and returns 404 for anything else.
+2. Start a `ThreadingHTTPServer` on `<LAN IP>:VP_SERVE_PORT` (falling back to `0.0.0.0` only if that address can't be bound, e.g. a NAT `VP_SERVE_HOST`) in a background thread. It serves exactly one file at an unguessable path (`/<secrets.token_urlsafe(16)>.mp3`) and returns 404 for anything else.
 3. LAN IP = `VP_SERVE_HOST`, or else the UDP-connect trick (`socket.connect(("8.8.8.8", 80))`, no packets sent).
 4. `POST {HA_URL}/api/services/media_player/play_media` with Bearer `HA_TOKEN` and JSON body `{"entity_id": ..., "media_content_id": url, "media_content_type": "music"}`.
 5. Keep serving until the file has been fully fetched and then (audio duration + 5 s), or until a timeout of 120 s. Then shut down.
@@ -232,7 +233,7 @@ The **orchestrator** (main session) independently re-runs the DoD and spot-check
 - uv project with a `src/` layout and Python pinned to 3.13. Deps: `typer`, `pydantic`, `pydantic-settings`, `python-dotenv`, `pyyaml`, `httpx`, `google-genai` (a version with `client.interactions` and `client.voices`), `openai`, `elevenlabs`. Dev deps: `pytest`, `pytest-mock`, `respx`, `ruff`, `mypy`, `types-PyYAML`.
 - ruff config (line length 100, rule sets E,F,I,UP,B,SIM). mypy with `ignore_missing_imports = true` and `disallow_untyped_defs = true` for `voice_playground.*`.
 - The pytest `live` marker is registered. `conftest.py` skips live tests unless the relevant `*_API_KEY` is present, and sets `VP_VOICES_DIR` and cache dir to tmp paths for unit tests.
-- `.gitignore` covers `.env`, `.env.*` (but not `.env.example`), `.vp_cache/`, `voices/audio/`, `out/`, `*.wav`/`*.mp3` at the repo root, `.venv`, and caches.
+- `.gitignore` covers `.env`, `.env.*` (but not `.env.example`), `.vp_cache/`, `voices/audio/`, `out/`, audio files anywhere in the tree (`*.wav *.mp3 *.m4a *.flac *.ogg *.aac *.webm *.pcm`), `.venv`, and caches.
 - `base.py` implements the §4 contracts exactly. `registry.py` has all three real providers plus `fake`. Real provider stubs are classes with the correct `name` and `capabilities` whose methods raise `NotImplementedError`.
 - `fake.py` implements every capability deterministically: it returns a 0.5 s 24 kHz sine WAV, echoes the file name as the transcript, and gives created voices ids like `fake_voice_<name>`.
 - `cli.py` has all commands from §2 with every flag declared, and help text. Bodies may call stubbed service functions.

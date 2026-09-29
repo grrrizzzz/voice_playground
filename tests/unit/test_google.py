@@ -575,3 +575,56 @@ def test_list_library_limit(provider: GoogleProvider, client: MagicMock) -> None
 def test_list_library_unknown_filter(provider: GoogleProvider) -> None:
     with pytest.raises(ConfigError, match="bogus"):
         provider.list_library(bogus="x")
+
+
+# ------------------------------------------------------- S3: only audio files are uploaded
+@pytest.mark.parametrize("field", ["reference_audio", "consent_audio"])
+def test_create_cloned_voice_rejects_non_audio_files(
+    provider: GoogleProvider, client: MagicMock, tmp_path: Path, field: str
+) -> None:
+    audio = tmp_path / "me.wav"
+    audio.write_bytes(b"x")
+    secret = tmp_path / "id_rsa"
+    secret.write_bytes(b"PRIVATE KEY")
+    reference, consent = (secret, audio) if field == "reference_audio" else (audio, secret)
+    cfg = ClonedVoiceConfig(name="me", reference_audio=reference, consent_audio=str(consent))
+    with pytest.raises(ConfigError, match=f"voice 'me'.*{field} must be an audio file"):
+        provider.create_voice(cfg)
+    client.voices.create.assert_not_called()
+
+
+# ------------------------------------------------ L2: validate_tts before creating voices
+def test_validate_tts_rejects_preview_model_with_custom_voice(provider: GoogleProvider) -> None:
+    with pytest.raises(ConfigError, match="does not support custom voices"):
+        provider.validate_tts(
+            model="gemini-3.1-flash-tts-preview", custom_voice=True, sample_rate=None
+        )
+
+
+@pytest.mark.parametrize(
+    ("model", "rate", "message"),
+    [
+        (None, 44_100, "sample_rate must be one of"),
+        ("gemini-3.1-flash-tts-preview", 16_000, "only outputs 24000 Hz"),
+    ],
+)
+def test_validate_tts_rejects_bad_sample_rates(
+    provider: GoogleProvider, model: str | None, rate: int, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        provider.validate_tts(model=model, custom_voice=False, sample_rate=rate)
+
+
+@pytest.mark.parametrize(
+    ("model", "custom", "rate"),
+    [
+        (None, True, None),
+        ("gemini-3.8-flash-lite-tts", True, 16_000),
+        ("gemini-3.1-flash-tts-preview", False, 24_000),
+    ],
+)
+def test_validate_tts_accepts_valid_requests(
+    provider: GoogleProvider, client: MagicMock, model: str | None, custom: bool, rate: int | None
+) -> None:
+    provider.validate_tts(model=model, custom_voice=custom, sample_rate=rate)
+    client.interactions.create.assert_not_called()

@@ -199,14 +199,17 @@ Fields by `type` (unknown fields are rejected, and errors name the file):
 |---|---|---|
 | `prebuilt` | `voice`: the provider voice name/id (`Kore`, `coral`, an ElevenLabs voice_id) | |
 | `designed` | `description`: natural-language description of the voice | `store` (google, default `true`) |
-| `cloned` | `reference_audio`: path to a recording (relative to the repo root) | `consent_audio` (consent recording; **required by google**), `store` (google, default `true`) |
+| `cloned` | `reference_audio`: path to a recording (relative to the repo root, or absolute; must be `.wav/.mp3/.m4a/.flac/.ogg/.aac/.webm`) | `consent_audio` (consent recording; **required by google**), `store` (google, default `true`) |
 
 Examples in `voices/`: `narrator.yaml` (google prebuilt + style), `storyteller.yaml` (google
 designed), `openai-coral.yaml`, `eleven-rachel.yaml`, and `me-clone.yaml.example` (google
 cloned; copy it to `me-clone.yaml` once you have recordings). Only `*.yaml`/`*.yml` files are
 loaded.
 
-`voices/audio/` is gitignored: recordings of real voices are personal data.
+`voices/audio/` is gitignored: recordings of real voices are personal data. Audio files
+(`*.wav`, `*.mp3`, `*.m4a`, ...) are ignored everywhere in the repo. `reference_audio` and
+`consent_audio` are uploaded to the provider, so they must have an audio extension; `vp`
+refuses anything else.
 
 ### The voice cache (`.vp_cache/voices.json`)
 
@@ -215,15 +218,19 @@ and their ids are cached in `.vp_cache/voices.json` (gitignored). Each entry sto
 `provider`, `remote_id`, `config_hash`, `created_at`, and `expires_at`.
 
 - `--no-auto-create` makes a missing voice an error instead of creating it.
-- The hash covers the fields that define the remote voice: `provider`, `type`, `store`,
-  `description`, and the audio file paths plus a hash of their contents. If you edit one of
-  them (or re-record the audio), the cached voice is **stale**: `vp` warns and recreates it.
-  Changing `style`, `model`, or `language` doesn't recreate anything.
+- The hash covers every field that may be sent when the voice is created: `provider`,
+  `type`, `store`, `description`, `model`, `language`, `provider_options`, and the audio file
+  paths plus a hash of their contents. If you edit one of them (or re-record the audio), the
+  cached voice is **stale**: `vp` warns and recreates it. Only `style` and `sample_rate`
+  (applied per request) never recreate anything. Some `provider_options` (e.g. ElevenLabs
+  `stability`) only affect synthesis, but editing them still recreates the voice.
 - Expired entries (Google: 1 year stored / 7 days stateless) are recreated automatically.
 - `vp voices show NAME` shows the cache status: `valid`, `missing`, `stale`, `expired`, or
   `provider_mismatch`.
-- `vp voices create NAME --force` recreates the voice even if the cache is valid. The old
-  remote voice is not deleted; use `vp voices delete NAME` first if you want that.
+- `vp voices create NAME --force` recreates the voice even if the cache is valid.
+- Whenever a voice is recreated (stale, expired, other provider, or `--force`), the remote
+  voice it replaces is deleted. If that fails (e.g. the old provider's key is missing), `vp`
+  prints a `warning:` with the orphaned voice id and carries on; delete it by hand.
 
 ## Sonos via Home Assistant
 
@@ -236,11 +243,15 @@ unguessable URL, then shuts down once the file has been fetched and played (at m
    in `.env` as `HA_TOKEN`.
 2. Set `HA_URL` (e.g. `http://homeassistant.local:8123`) and `HA_SONOS_ENTITY` (the Sonos
    entity id from *Settings > Devices & services > Entities*, e.g. `media_player.living_room`).
+   `HA_TOKEN` is sent as a Bearer header, so over plain `http://` it travels in cleartext:
+   use an `https://` `HA_URL` unless Home Assistant is on a trusted LAN.
 3. **macOS firewall:** if the firewall is on, allow incoming connections for Python (System
    Settings > Network > Firewall > Options, or accept the prompt the first time). Otherwise
    the Sonos can't fetch the file and `vp` reports that the file was never fetched.
-4. `vp` detects this computer's LAN IP automatically. If it picks the wrong interface (VPN,
-   several networks), set `VP_SERVE_HOST` to the IP the Sonos can reach. Set `VP_SERVE_PORT`
+4. `vp` detects this computer's LAN IP automatically and binds the temporary server to that
+   address only. If it picks the wrong interface (VPN, several networks), set
+   `VP_SERVE_HOST` to the IP the Sonos can reach (if that address isn't one of this
+   computer's, e.g. behind NAT, the server listens on all interfaces instead). Set `VP_SERVE_PORT`
    if you need a fixed port for a firewall rule.
 
 ```bash
@@ -259,7 +270,6 @@ vp play out.wav --play sonos
    from voice_playground.providers.base import (
        AudioResult, BaseProvider, Capability, STTRequest, Transcript, TTSRequest,
    )
-   from voice_playground.settings import require_secret
 
 
    class AcmeProvider(BaseProvider):
@@ -267,10 +277,12 @@ vp play out.wav --play sonos
        capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.TTS, Capability.STT})
        default_tts_model: ClassVar[str | None] = "acme-tts-1"
        default_stt_model: ClassVar[str | None] = "acme-stt-1"
+       api_key_env: ClassVar[str | None] = "ACME_API_KEY"   # None if no key is needed
+       default_voice: ClassVar[str | None] = "acme-voice-1"  # used when --voice is omitted
 
        def __init__(self, settings):
            super().__init__(settings)
-           self._key = require_secret(settings.acme_api_key, "ACME_API_KEY")  # ConfigError if missing
+           self._key = self._require_api_key()  # ConfigError naming ACME_API_KEY if missing
 
        def tts(self, req: TTSRequest) -> AudioResult: ...
        def stt(self, req: STTRequest) -> Transcript: ...
@@ -279,12 +291,16 @@ vp play out.wav --play sonos
    Anything you don't override (`create_voice`, `delete_voice`, `list_library`, ...) raises
    `UnsupportedCapability`. Return audio with the right `mime_type` (`audio/wav`,
    `audio/mpeg`, `audio/l16`); the service converts it to the requested format. Map SDK
-   exceptions to `ProviderError` with a short message that never includes the key.
-2. Register it with one line in `providers/registry.py`:
-   `"acme": "voice_playground.providers.acme:AcmeProvider",` in `PROVIDERS`, and add
-   `"acme": "ACME_API_KEY"` to `API_KEY_ENV` (use `None` if no key is needed).
-3. Add the key field to `Settings` (`acme_api_key: SecretStr | None = None`) and to
-   `.env.example`, and a default voice in `service.DEFAULT_VOICES`.
+   exceptions to `ProviderError` with a short message that never includes the key. If some
+   request combinations are invalid (model vs custom voice, sample rate), override
+   `validate_tts(...)` so they are rejected before a custom voice is created.
+
+   `api_key_env` is all the key plumbing you need: the key is read from the environment or
+   `.env` (no `Settings` field required), `vp providers` shows its yes/no status, and CLI
+   error messages mask its value.
+2. Register it with one line in `PROVIDERS` in `providers/registry.py`:
+   `"acme": "voice_playground.providers.acme:AcmeProvider",`
+3. Add `ACME_API_KEY=` to `.env.example` (and your real key to `.env`).
 4. Add tests: `tests/unit/test_acme.py` with the SDK mocked (request payloads, error mapping,
    no key in messages), and `tests/live/test_acme_live.py` marked `@pytest.mark.live` (it is
    skipped automatically when `ACME_API_KEY` isn't set).

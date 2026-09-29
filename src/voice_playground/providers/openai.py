@@ -51,7 +51,6 @@ from voice_playground.providers.base import (
     Transcript,
     TTSRequest,
 )
-from voice_playground.settings import require_secret
 
 if TYPE_CHECKING:
     from voice_playground.settings import Settings
@@ -118,10 +117,12 @@ class OpenAIProvider(BaseProvider):
     )
     default_tts_model: ClassVar[str | None] = "gpt-4o-mini-tts"
     default_stt_model: ClassVar[str | None] = "gpt-transcribe"
+    api_key_env: ClassVar[str | None] = "OPENAI_API_KEY"
+    default_voice: ClassVar[str | None] = "coral"
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
-        self._api_key = require_secret(settings.openai_api_key, "OPENAI_API_KEY")
+        self._api_key = self._require_api_key()
         self._client = openai.OpenAI(api_key=self._api_key)
         self._warned: set[str] = set()
 

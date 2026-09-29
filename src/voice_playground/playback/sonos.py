@@ -14,6 +14,8 @@ import socket
 import threading
 import time
 import wave
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -22,15 +24,19 @@ from urllib.parse import urlsplit
 import httpx
 
 from voice_playground import audio
-from voice_playground.errors import ConfigError, ProviderError
+from voice_playground.errors import ConfigError, ProviderError, VPError
 from voice_playground.providers.base import AudioResult
 from voice_playground.settings import require_secret
 
 if TYPE_CHECKING:
     from voice_playground.settings import Settings
 
-#: Interface the temporary server binds to (tests override this with 127.0.0.1).
-BIND_HOST = "0.0.0.0"
+#: Interface the temporary server binds to. `None` = the LAN IP handed to the Sonos (falling
+#: back to all interfaces if that address can't be bound, e.g. a NAT/external VP_SERVE_HOST).
+#: Tests override this with 127.0.0.1.
+BIND_HOST: str | None = None
+#: Fallback bind address when the LAN IP itself can't be bound.
+FALLBACK_BIND_HOST = "0.0.0.0"
 #: Seconds to wait for the Sonos to request the file after Home Assistant accepted the call.
 FETCH_TIMEOUT = 15.0
 #: Extra seconds to keep serving after the audio's duration has elapsed.
@@ -65,7 +71,7 @@ def play_sonos(
     mp3 = audio.convert(result, "mp3")
     host = _lan_ip(settings)
 
-    with _OneFileServer(mp3.data, host=BIND_HOST, port=settings.serve_port) as server:
+    with _serve(mp3.data, BIND_HOST or host, settings.serve_port) as server:
         deadline = time.monotonic() + max_serve
         media_url = f"http://{host}:{server.port}{server.path}"
         _call_home_assistant(ha_url, token, entity, media_url)
@@ -80,6 +86,27 @@ def play_sonos(
         if server.fetched.wait(_remaining(deadline)):
             play_time = (duration if duration is not None else DEFAULT_DURATION) + grace
             threading.Event().wait(min(play_time, _remaining(deadline)))
+
+
+@contextmanager
+def _serve(data: bytes, bind_host: str, port: int) -> Iterator[_OneFileServer]:
+    """Run the one-file server on `bind_host` (the LAN IP, not all interfaces).
+
+    If that address can't be bound (VP_SERVE_HOST may be an address this machine doesn't
+    own, e.g. behind NAT), fall back to all interfaces.
+    """
+    server = _OneFileServer(data, host=bind_host, port=port)
+    try:
+        server.__enter__()
+    except ProviderError as exc:
+        if bind_host == FALLBACK_BIND_HOST or not isinstance(exc.__cause__, OSError):
+            raise
+        server = _OneFileServer(data, host=FALLBACK_BIND_HOST, port=port)
+        server.__enter__()
+    try:
+        yield server
+    finally:
+        server.close()
 
 
 def _remaining(deadline: float) -> float:
@@ -101,7 +128,11 @@ def _ha_config(settings: Settings, entity_id: str | None) -> tuple[str, str, str
 
 
 def _duration(result: AudioResult) -> float | None:
-    """Audio duration in seconds for WAV / L16 input, or `None` if it can't be determined."""
+    """Audio duration in seconds, or `None` if it can't be determined.
+
+    WAV / L16 are measured directly; MP3 and unknown types are decoded to WAV with ffmpeg
+    (`audio.convert`), so the server doesn't linger for `DEFAULT_DURATION` after short clips.
+    """
     mime = result.mime_type.lower()
     if mime in ("audio/wav", "audio/x-wav", "audio/wave"):
         try:
@@ -114,7 +145,10 @@ def _duration(result: AudioResult) -> float | None:
         if not result.sample_rate or result.channels < 1:
             return None
         return len(result.data) / (result.sample_rate * 2 * result.channels)
-    return None
+    try:
+        return audio.wav_info(audio.convert(result, "wav").data).duration
+    except VPError:
+        return None
 
 
 def _lan_ip(settings: Settings) -> str:
@@ -187,7 +221,7 @@ class _OneFileServer:
         self,
         data: bytes,
         *,
-        host: str = BIND_HOST,
+        host: str = FALLBACK_BIND_HOST,
         port: int = 0,
         content_type: str = "audio/mpeg",
         suffix: str = ".mp3",

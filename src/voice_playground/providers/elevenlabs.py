@@ -38,7 +38,7 @@ from voice_playground.providers.base import (
     Transcript,
     TTSRequest,
 )
-from voice_playground.settings import require_secret
+from voice_playground.voices import check_audio_file
 
 if TYPE_CHECKING:
     from voice_playground.settings import Settings
@@ -129,10 +129,13 @@ class ElevenLabsProvider(BaseProvider):
     )
     default_tts_model: ClassVar[str | None] = TTS_MODELS[0]
     default_stt_model: ClassVar[str | None] = STT_MODELS[0]
+    api_key_env: ClassVar[str | None] = "ELEVENLABS_API_KEY"
+    #: "George", an ElevenLabs premade voice.
+    default_voice: ClassVar[str | None] = "JBFqnCBsd6RMkjVDRZzb"
 
     def __init__(self, settings: Settings, client: Any = None) -> None:
         super().__init__(settings)
-        self._api_key = require_secret(settings.elevenlabs_api_key, "ELEVENLABS_API_KEY")
+        self._api_key = self._require_api_key()
         self._client_obj = client
 
     # -- plumbing ---------------------------------------------------------------------------
@@ -286,6 +289,7 @@ class ElevenLabsProvider(BaseProvider):
         return CreatedVoice(remote_id=voice.voice_id, expires_at=None)
 
     def _clone_voice(self, name: str, path: Path, options: dict[str, Any]) -> CreatedVoice:
+        check_audio_file(path, voice=name, field="reference_audio")
         if not path.is_file():
             raise ConfigError(f"voice '{name}': reference_audio not found: {path}")
         kwargs: dict[str, Any] = {"name": name}

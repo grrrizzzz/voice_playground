@@ -13,7 +13,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, runtime_checkable
 
-from voice_playground.errors import UnsupportedCapability
+from voice_playground.errors import ConfigError, UnsupportedCapability
+from voice_playground.settings import require_secret
 
 if TYPE_CHECKING:
     from voice_playground.settings import Settings
@@ -116,16 +117,43 @@ class BaseProvider:
     """Optional convenience base class implementing `Provider`.
 
     Stores `settings` and makes every method raise `UnsupportedCapability` by default, so a
-    subclass only overrides what it supports. Subclasses must set the four ClassVars.
+    subclass only overrides what it supports. Subclasses must set the four `Provider`
+    ClassVars, and may set:
+
+    - `api_key_env`: the env var holding the provider's API key (`None` = no key). It drives
+      `vp providers` key status and secret masking in CLI errors, and `_require_api_key()`.
+    - `default_voice`: the voice used when `vp tts` gets no `--voice` (`None` = required).
+
+    These extras live here, not on the `Provider` Protocol; code reading them uses
+    `getattr(cls, "api_key_env", None)` so a Protocol-only provider still works.
     """
 
     name: ClassVar[str]
     capabilities: ClassVar[frozenset[Capability]] = frozenset()
     default_tts_model: ClassVar[str | None] = None
     default_stt_model: ClassVar[str | None] = None
+    api_key_env: ClassVar[str | None] = None
+    default_voice: ClassVar[str | None] = None
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+
+    def _require_api_key(self) -> str:
+        """The plain API key from `api_key_env`, or `ConfigError` naming the env var."""
+        if self.api_key_env is None:
+            raise ConfigError(f"provider '{self.name}' does not declare api_key_env")
+        return require_secret(self.settings.api_key(self.api_key_env), self.api_key_env)
+
+    def validate_tts(
+        self, *, model: str | None, custom_voice: bool, sample_rate: int | None
+    ) -> None:
+        """Cheap provider-side checks run BEFORE a designed/cloned voice is auto-created.
+
+        `model` is the effective model (None = provider default), `custom_voice` is True when
+        the request will use a created (designed/cloned) voice, `sample_rate` the requested
+        rate. Raise `ConfigError` for a combination `tts` would reject. Default: no checks.
+        """
+        return None
 
     def _unsupported(self, capability: Capability) -> UnsupportedCapability:
         return UnsupportedCapability(f"provider '{self.name}' does not support {capability.value}")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import shutil
 import socket
 import time
 import urllib.request
@@ -524,3 +525,107 @@ def test_play_sonos_propagates_conversion_error(monkeypatch: pytest.MonkeyPatch)
         with pytest.raises(ProviderError, match="ffmpeg"):
             sonos.play_sonos(result, _settings())
         assert not route.called
+
+
+# --------------------------------------------------------------- L1: MP3 input duration
+
+
+def test_duration_of_mp3_is_decoded_via_wav(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def convert(result: AudioResult, fmt: str) -> AudioResult:
+        calls.append(fmt)
+        return AudioResult(data=_wav(1.5), mime_type="audio/wav", sample_rate=8000)
+
+    monkeypatch.setattr(audio, "convert", convert)
+    mp3 = AudioResult(data=MP3_BYTES, mime_type="audio/mpeg", sample_rate=None)
+    assert sonos._duration(mp3) == 1.5
+    assert calls == ["wav"]
+
+
+def test_duration_falls_back_to_none_when_decoding_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(result: AudioResult, fmt: str) -> AudioResult:
+        raise ConfigError("ffmpeg is required")
+
+    monkeypatch.setattr(audio, "convert", broken)
+    mp3 = AudioResult(data=MP3_BYTES, mime_type="audio/mpeg", sample_rate=None)
+    assert sonos._duration(mp3) is None
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_duration_of_real_mp3_with_ffmpeg() -> None:
+    wav = AudioResult(data=_wav(0.5, rate=24000), mime_type="audio/wav", sample_rate=24000)
+    mp3 = audio.convert(wav, "mp3")
+    duration = sonos._duration(mp3)
+    assert duration is not None
+    assert 0.4 <= duration <= 0.7  # MP3 encoder padding adds a few ms
+
+
+def test_play_sonos_mp3_input_does_not_wait_default_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def convert(result: AudioResult, fmt: str) -> AudioResult:
+        if fmt == "wav":
+            return AudioResult(data=_wav(0.2), mime_type="audio/wav", sample_rate=8000)
+        return result  # already MP3
+
+    monkeypatch.setattr(audio, "convert", convert)
+
+    def fetch(url: str) -> None:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            resp.read()
+
+    result = AudioResult(data=MP3_BYTES, mime_type="audio/mpeg", sample_rate=None)
+    with respx.mock:
+        respx.post(HA_ENDPOINT).mock(side_effect=_fetching_ha(fetch))
+        start = time.monotonic()
+        sonos.play_sonos(result, _settings(), fetch_timeout=2, grace=0.1, max_serve=10)
+        elapsed = time.monotonic() - start
+    assert 0.3 <= elapsed < 3  # 0.2 s audio + 0.1 s grace, not DEFAULT_DURATION
+
+
+# ------------------------------------------------ S2: bind the LAN IP, not all interfaces
+
+
+def test_play_sonos_binds_the_lan_ip(
+    monkeypatch: pytest.MonkeyPatch, fake_convert: list[Any]
+) -> None:
+    monkeypatch.setattr(sonos, "BIND_HOST", None)  # production default
+    hosts: list[str] = []
+    real_init = sonos._OneFileServer.__init__
+
+    def spy_init(self: sonos._OneFileServer, data: bytes, **kwargs: Any) -> None:
+        hosts.append(kwargs["host"])
+        real_init(self, data, **kwargs)
+
+    monkeypatch.setattr(sonos._OneFileServer, "__init__", spy_init)
+
+    def fetch(url: str) -> None:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            resp.read()
+
+    result = AudioResult(data=_wav(0.05), mime_type="audio/wav", sample_rate=8000)
+    with respx.mock:
+        respx.post(HA_ENDPOINT).mock(side_effect=_fetching_ha(fetch))
+        sonos.play_sonos(
+            result, _settings(serve_host="127.0.0.1"), fetch_timeout=2, grace=0, max_serve=5
+        )
+    assert hosts == ["127.0.0.1"]
+
+
+def test_serve_binds_requested_host() -> None:
+    with sonos._serve(MP3_BYTES, "127.0.0.1", 0) as server:
+        assert server._host == "127.0.0.1"
+        status, _, body = _get(server.port, server.path)
+        assert (status, body) == (200, MP3_BYTES)
+    with pytest.raises(RuntimeError):
+        _ = server.port  # closed on exit
+
+
+def test_serve_falls_back_when_lan_ip_cannot_be_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 203.0.113.5 (TEST-NET-3) is not an address of this machine, e.g. a NAT VP_SERVE_HOST.
+    monkeypatch.setattr(sonos, "FALLBACK_BIND_HOST", "127.0.0.1")  # tests stay on loopback
+    with sonos._serve(MP3_BYTES, "203.0.113.5", 0) as server:
+        assert server._host == "127.0.0.1"
+        status, _, body = _get(server.port, server.path)
+        assert (status, body) == (200, MP3_BYTES)

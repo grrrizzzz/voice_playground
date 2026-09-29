@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from voice_playground.providers.registry import API_KEY_ENV
+from voice_playground.errors import VPError
+from voice_playground.providers.registry import api_key_env, provider_names
 from voice_playground.settings import ENV_FILE_VAR, Settings, get_settings
 
 SECRET_ENV_VARS = ("GOOGLE_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY", "HA_TOKEN")
@@ -25,7 +26,7 @@ def _live_provider(item: pytest.Item) -> str | None:
     if marker is not None and marker.args:
         return str(marker.args[0])
     stem = item.path.stem
-    return next((name for name in API_KEY_ENV if name in stem), None)
+    return next((name for name in provider_names() if name in stem), None)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -35,11 +36,14 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     real = get_settings()  # reads the real .env; only presence is checked, never printed
     for item in live_items:
         provider = _live_provider(item)
-        env_var = API_KEY_ENV.get(provider) if provider else None
+        try:
+            env_var = api_key_env(provider) if provider else None
+        except VPError as exc:
+            item.add_marker(pytest.mark.skip(reason=f"provider '{provider}' unavailable: {exc}"))
+            continue
         if env_var is None:
             continue
-        secret = getattr(real, env_var.lower(), None)
-        if secret is None or not secret.get_secret_value().strip():
+        if real.api_key(env_var) is None:
             item.add_marker(pytest.mark.skip(reason=f"{env_var} not set"))
 
 

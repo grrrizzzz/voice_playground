@@ -39,6 +39,11 @@ VOICE_SUFFIXES: tuple[str, ...] = (".yaml", ".yml")
 #: Names that may be looked up as files. Anything else (paths, `..`) is never a file lookup.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+#: Extensions accepted for `reference_audio` / `consent_audio` (these files get uploaded).
+AUDIO_EXTENSIONS: frozenset[str] = frozenset(
+    {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".webm"}
+)
+
 CacheStatus = Literal["valid", "missing", "provider_mismatch", "stale", "expired"]
 
 
@@ -212,13 +217,23 @@ def _file_sha256(path: Path) -> str | None:
 def config_hash(cfg: VoiceConfig, root: Path | None = None) -> str:
     """Stable sha256 of the fields that define a remote voice (detects a stale cache).
 
-    Covers `provider`, `type`, `store`, and `description` (designed) or the `reference_audio`
-    path plus a hash of its contents (cloned; `null` if the file is unreadable), plus the
-    same for `consent_audio` when it is set. `style`,
-    `model`, `language`, etc. are applied per request, so changing them does not invalidate
-    the remote voice. `root` resolves relative audio paths (default: cwd).
+    Covers `provider`, `type`, and for designed/cloned voices everything a provider may send
+    when creating the voice: `model`, `language`, `provider_options` (e.g. google gender /
+    accent / persona, elevenlabs design_model_id), `store`, and `description` (designed) or
+    the `reference_audio` path plus a hash of its contents (cloned; `null` if the file is
+    unreadable), plus the same for `consent_audio` when it is set. Some `provider_options`
+    keys only affect synthesis, so editing them recreates the voice needlessly; that
+    over-invalidation is accepted to never keep a voice built from an outdated config.
+    Only `style` and `sample_rate` (per-request) are excluded. `root` resolves relative
+    audio paths (default: cwd).
     """
     payload: dict[str, Any] = {"provider": cfg.provider, "type": cfg.type}
+    if not isinstance(cfg, PrebuiltVoiceConfig):
+        payload |= {
+            "model": cfg.model,
+            "language": cfg.language,
+            "provider_options": cfg.provider_options,
+        }
     if isinstance(cfg, DesignedVoiceConfig):
         payload |= {"description": cfg.description, "store": cfg.store}
     elif isinstance(cfg, ClonedVoiceConfig):
@@ -236,8 +251,28 @@ def config_hash(cfg: VoiceConfig, root: Path | None = None) -> str:
             }
     else:
         payload |= {"voice": cfg.voice}
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def check_audio_file(
+    path: Path | str, *, voice: str, field: str, source: Path | None = None
+) -> None:
+    """Reject `reference_audio` / `consent_audio` paths without an audio extension.
+
+    These files are uploaded to the provider, so a config must not point at arbitrary files
+    (e.g. `~/.ssh/id_rsa`). Paths outside the repo are allowed (recordings may live
+    anywhere). Raises `ConfigError` naming the voice (and its config file when known).
+    """
+    given = Path(path)
+    # Check the symlink-resolved target too: `me.wav -> ~/.ssh/id_rsa` must not pass.
+    suffixes = {given.suffix.lower(), given.expanduser().resolve().suffix.lower()}
+    if not suffixes <= AUDIO_EXTENSIONS:
+        where = f"voice '{voice}' ({source})" if source is not None else f"voice '{voice}'"
+        allowed = ", ".join(sorted(AUDIO_EXTENSIONS))
+        raise ConfigError(
+            f"{where}: {field} must be an audio file ({allowed}), got '{Path(path).name}'"
+        )
 
 
 def _resolve_path(path: Path, root: Path | None) -> Path:
@@ -459,6 +494,10 @@ def resolve_voice(
         )
     if isinstance(cfg, ClonedVoiceConfig):
         audio = _audio_path(cfg, root)
+        check_audio_file(audio, voice=cfg.name, field="reference_audio", source=path)
+        if cfg.consent_audio is not None:
+            consent = _resolve_path(Path(cfg.consent_audio), root)
+            check_audio_file(consent, voice=cfg.name, field="consent_audio", source=path)
         if not audio.is_file():
             raise ConfigError(
                 f"voice '{cfg.name}' ({path}): reference_audio not found: {cfg.reference_audio}"

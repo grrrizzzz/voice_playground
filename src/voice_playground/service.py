@@ -6,13 +6,15 @@ The CLI stays thin: it parses flags and calls one function here per command. Fun
 TTS pipeline (`run_tts`):
 1. Text: `--text`, else `--text-file`, else stdin when it isn't a TTY, else `ConfigError`.
 2. Voice: `voices.resolve_voice` (config file or raw provider voice name). With no `--voice`,
-   the provider's entry in `DEFAULT_VOICES` is used. A provider is required (flag or config);
+   the provider class's `default_voice` is used. A provider is required (flag or config);
    no default provider is guessed.
 3. Designed/cloned voices without a valid cached id are created remotely and cached, unless
-   `auto_create` is False (`ConfigError`).
+   `auto_create` is False (`ConfigError`). Cheap provider checks (`validate_tts`) run first,
+   and the replaced remote voice (stale / expired / other provider / `--force`) is deleted.
 4. Precedence: CLI flag > voice config field > provider default (model, style).
-5. The provider result is always passed through `audio.convert` / `audio.write_output`, so the
-   requested format is guaranteed even when a provider returns WAV for an MP3 request.
+5. The provider result is converted once with `audio.convert` (for `-o` and local playback),
+   so the requested format is guaranteed even when a provider returns WAV for an MP3 request.
+   Sonos gets the unconverted result (it converts to MP3 itself).
 6. Output: with `-o`, write (format from extension unless `--format`), play only if `--play`
    or `--speaker` is given. Without `-o`, play locally (default) or on Sonos.
 """
@@ -22,6 +24,7 @@ from __future__ import annotations
 import dataclasses
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TextIO, cast
 
@@ -41,7 +44,6 @@ from voice_playground.providers.base import (
     TTSRequest,
 )
 from voice_playground.providers.registry import (
-    API_KEY_ENV,
     get_provider,
     get_provider_class,
     provider_names,
@@ -55,14 +57,6 @@ from voice_playground.voices import (
     load_voice,
     resolve_voice,
 )
-
-#: Voice used when `vp tts` gets no `--voice`. A new provider should add an entry here.
-DEFAULT_VOICES: dict[str, str] = {
-    "google": "Kore",
-    "openai": "coral",
-    "elevenlabs": "JBFqnCBsd6RMkjVDRZzb",  # "George", an ElevenLabs premade voice
-    "fake": "fake-voice",
-}
 
 AudioFormat = Literal["wav", "mp3", "pcm"]
 
@@ -91,18 +85,13 @@ def providers_info(settings: Settings) -> list[ProviderInfo]:
     """Describe every registered provider without constructing it (no key needed)."""
     infos: list[ProviderInfo] = []
     for name in provider_names():
-        key_env = API_KEY_ENV.get(name)
-        key_present: bool | None = None
-        if key_env is not None:
-            secret = getattr(settings, key_env.lower(), None)
-            key_present = secret is not None and bool(secret.get_secret_value().strip())
         try:
             cls = get_provider_class(name)
         except VPError as exc:
-            infos.append(
-                ProviderInfo(name, frozenset(), None, None, key_env, key_present, error=str(exc))
-            )
+            infos.append(ProviderInfo(name, frozenset(), None, None, None, None, error=str(exc)))
             continue
+        key_env: str | None = getattr(cls, "api_key_env", None)
+        key_present = None if key_env is None else settings.api_key(key_env) is not None
         infos.append(
             ProviderInfo(
                 name=name,
@@ -167,20 +156,62 @@ def _play(settings: Settings, result: AudioResult, target: str, speaker: str | N
         local_playback.play_local(result)
 
 
+def _create_voice(
+    settings: Settings, cache: VoiceCache, prov: Provider, provider: str, cfg: VoiceConfig
+) -> CreatedVoice:
+    """Create `cfg` on `prov`, delete the remote voice it replaces, and cache the new id.
+
+    The previous cache entry (stale, expired, created on another provider, or replaced with
+    `--force`) would otherwise be orphaned remotely. A failed delete never blocks the new
+    voice: it prints a one-line warning with the orphaned id (silently tolerated when the
+    old entry had expired, since the provider may already have removed it).
+    """
+    old = cache.get(cfg.name)
+    created = prov.create_voice(cfg)
+    if old is not None and not (old.provider == provider and old.remote_id == created.remote_id):
+        _delete_old_voice(settings, cfg.name, old.provider, old.remote_id, old.expires_at)
+    cache.record(cfg, provider, created)
+    return created
+
+
+def _delete_old_voice(
+    settings: Settings,
+    name: str,
+    provider: str,
+    remote_id: str,
+    expires_at: datetime | None,
+) -> None:
+    expired = expires_at is not None and (
+        expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=UTC)
+    ) <= datetime.now(UTC)
+    try:
+        get_provider(provider, settings).delete_voice(remote_id)
+    except VPError as exc:
+        if not expired:
+            _warn(
+                f"could not delete the old {provider} voice {remote_id} replaced by '{name}' "
+                f"({' '.join(str(exc).split())}); it is orphaned, delete it manually"
+            )
+
+
 def _resolve_tts_voice(
     settings: Settings,
     cache: VoiceCache,
     voice: str | None,
     provider: str | None,
     auto_create: bool,
+    model: str | None = None,
 ) -> tuple[str, Provider, ResolvedVoice, VoiceConfig | None]:
-    """Resolve provider + voice (rules 2-4); create designed/cloned voices on first use."""
+    """Resolve provider + voice (rules 2-4); create designed/cloned voices on first use.
+
+    `model` is the `--model` flag; it is only used to validate the request with the provider
+    (`validate_tts`) before a voice is created.
+    """
     if voice is None:
         if provider is None:
             raise ConfigError("pass --provider (and optionally --voice)")
-        default = DEFAULT_VOICES.get(provider)
+        default: str | None = getattr(get_provider_class(provider), "default_voice", None)
         if default is None:
-            get_provider_class(provider)  # unknown provider -> ConfigError listing valid names
             raise ConfigError(f"provider '{provider}' has no default voice; pass --voice")
         return provider, get_provider(provider, settings), ResolvedVoice(default), None
 
@@ -201,9 +232,15 @@ def _resolve_tts_voice(
                 f"voice '{cfg.name}' has not been created on {name} yet; run "
                 f"`vp voices create {cfg.name}` or drop --no-auto-create"
             )
+        validate = getattr(prov, "validate_tts", None)
+        if validate is not None:
+            validate(
+                model=model or cfg.model or type(prov).default_tts_model,
+                custom_voice=True,
+                sample_rate=resolved.sample_rate,
+            )
         print(f"creating {cfg.type} voice '{cfg.name}' on {name}...", file=sys.stderr)
-        created = prov.create_voice(cfg)
-        cache.record(cfg, name, created)
+        created = _create_voice(settings, cache, prov, name, cfg)
         resolved = dataclasses.replace(resolved, provider_voice=created.remote_id)
     return name, prov, resolved, cfg
 
@@ -238,7 +275,7 @@ def run_tts(
 
     cache = VoiceCache(settings.cache_dir)
     provider_name, prov, resolved, cfg = _resolve_tts_voice(
-        settings, cache, voice, provider, auto_create
+        settings, cache, voice, provider, auto_create, model
     )
     if style is not None:
         resolved = dataclasses.replace(resolved, style=style)
@@ -262,11 +299,17 @@ def run_tts(
             f"(requested {resolved.sample_rate} Hz); not resampling"
         )
 
+    # Convert at most once: the same converted audio is written and played locally.
+    final = audio.convert(result, target_fmt) if output is not None or target == "local" else None
     written: Path | None = None
     if output is not None:
-        written = audio.write_output(result, output, target_fmt)
-    if target is not None:
-        _play(settings, audio.convert(result, target_fmt), target, speaker)
+        assert final is not None
+        written = audio.write_output(final, output, target_fmt)
+    if target == "sonos":
+        _play(settings, result, target, speaker)  # sonos converts to MP3 itself
+    elif target == "local":
+        assert final is not None
+        _play(settings, final, target, speaker)
     return written
 
 
@@ -346,9 +389,7 @@ def voices_create(settings: Settings, name: str, force: bool = False) -> Created
         entry = cache.get(name)
         assert entry is not None
         return CreatedVoice(remote_id=entry.remote_id, expires_at=entry.expires_at)
-    created = get_provider(provider, settings).create_voice(cfg)
-    cache.record(cfg, provider, created)
-    return created
+    return _create_voice(settings, cache, get_provider(provider, settings), provider, cfg)
 
 
 def voices_library(settings: Settings, provider: str, **filters: Any) -> list[LibraryVoice]:

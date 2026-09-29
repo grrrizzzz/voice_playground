@@ -84,6 +84,8 @@ class FakeProvider(BaseProvider):
     capabilities: ClassVar[frozenset[Capability]] = frozenset(Capability)
     default_tts_model: ClassVar[str | None] = "fake-tts"
     default_stt_model: ClassVar[str | None] = "fake-stt"
+    api_key_env: ClassVar[str | None] = None
+    default_voice: ClassVar[str | None] = "fake-voice"
 
     def tts(self, req: TTSRequest) -> AudioResult:
         rate = req.sample_rate or req.voice.sample_rate or DEFAULT_SAMPLE_RATE

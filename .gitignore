@@ -7,8 +7,15 @@
 .vp_cache/
 voices/audio/
 out/
-/*.wav
-/*.mp3
+# Audio anywhere in the tree (recordings are personal data; outputs are large)
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.webm
+*.pcm
 
 # Python / tooling
 .venv/

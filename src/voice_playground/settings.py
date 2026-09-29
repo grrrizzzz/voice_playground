@@ -6,7 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pydantic import AliasChoices, Field, SecretStr
+from dotenv import dotenv_values
+from pydantic import AliasChoices, Field, PrivateAttr, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from voice_playground.errors import ConfigError
@@ -54,6 +55,32 @@ class Settings(BaseSettings):
         default=Path(".vp_cache"), validation_alias=_alias("VP_CACHE_DIR", "cache_dir")
     )
 
+    #: Dotenv file `api_key()` falls back to for undeclared keys (set by `get_settings()`).
+    _dotenv_path: Path | None = PrivateAttr(default=None)
+
+    def api_key(self, env_name: str) -> SecretStr | None:
+        """Secret for env var `env_name` (e.g. `ACME_API_KEY`), or None if unset/empty.
+
+        Uses the declared field (`acme_api_key`) when there is one. Otherwise reads the
+        environment, then the dotenv file `get_settings()` loaded, so a new provider needs no
+        `Settings` field.
+        """
+        field = env_name.lower()
+        if field in type(self).model_fields:
+            value = getattr(self, field)
+            if value is None or isinstance(value, SecretStr):
+                return value if value is None or value.get_secret_value().strip() else None
+            raise ConfigError(f"{env_name} is not a secret setting")
+        raw = os.environ.get(env_name)
+        if (raw is None or not raw.strip()) and self._dotenv_path is not None:
+            try:
+                raw = dotenv_values(self._dotenv_path).get(env_name)
+            except OSError:
+                raw = None
+        if raw is None or not raw.strip():
+            return None
+        return SecretStr(raw)
+
 
 def get_settings() -> Settings:
     """Build `Settings` from the environment plus the dotenv file.
@@ -62,8 +89,11 @@ def get_settings() -> Settings:
     the `VP_ENV_FILE` environment variable (tests point it at a non-existent file).
     """
     # Passed via a dict: `_env_file` is a BaseSettings init arg mypy doesn't see on subclasses.
-    init_args: dict[str, Any] = {"_env_file": os.environ.get(ENV_FILE_VAR, ".env")}
-    return Settings(**init_args)
+    env_file = os.environ.get(ENV_FILE_VAR, ".env")
+    init_args: dict[str, Any] = {"_env_file": env_file}
+    settings = Settings(**init_args)
+    settings._dotenv_path = Path(env_file)
+    return settings
 
 
 def require_secret(value: SecretStr | None, env_var: str) -> str:

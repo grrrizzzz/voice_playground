@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from voice_playground import service
 from voice_playground.errors import ConfigError, VPError
+from voice_playground.providers.registry import get_provider_class, provider_names
 from voice_playground.settings import Settings, get_settings
 
 app = typer.Typer(
@@ -48,16 +49,24 @@ def _debug() -> bool:
     return _state["debug"] or os.environ.get("VP_DEBUG", "").strip().lower() in {"1", "true", "yes"}
 
 
+def _secrets(settings: Settings) -> list[SecretStr | None]:
+    """Every secret to mask: each registered provider's `api_key_env` key, plus HA_TOKEN."""
+    found: list[SecretStr | None] = [settings.ha_token]
+    for name in provider_names():
+        try:
+            env_name = getattr(get_provider_class(name), "api_key_env", None)
+            if env_name:
+                found.append(settings.api_key(env_name))
+        except VPError:
+            continue  # provider module can't be imported; it can't have leaked its key
+    return found
+
+
 def _scrub(message: str, settings: Settings | None) -> str:
     """Collapse to one line and mask any secret value from settings (defense in depth)."""
     line = " ".join(message.split())
     if settings is not None:
-        for secret in (
-            settings.google_api_key,
-            settings.openai_api_key,
-            settings.elevenlabs_api_key,
-            settings.ha_token,
-        ):
+        for secret in _secrets(settings):
             value = secret.get_secret_value().strip() if secret is not None else ""
             if value:
                 line = line.replace(value, "***")

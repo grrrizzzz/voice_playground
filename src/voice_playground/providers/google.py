@@ -42,7 +42,7 @@ from voice_playground.providers.base import (
     Transcript,
     TTSRequest,
 )
-from voice_playground.settings import require_secret
+from voice_playground.voices import check_audio_file
 
 if TYPE_CHECKING:
     from voice_playground.settings import Settings
@@ -168,10 +168,12 @@ class GoogleProvider(BaseProvider):
     )
     default_tts_model: ClassVar[str | None] = TTS_MODELS[0]
     default_stt_model: ClassVar[str | None] = STT_MODEL
+    api_key_env: ClassVar[str | None] = "GOOGLE_API_KEY"
+    default_voice: ClassVar[str | None] = "Kore"
 
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
-        self._api_key = require_secret(settings.google_api_key, "GOOGLE_API_KEY")
+        self._api_key = self._require_api_key()
         self._client_obj: genai.Client | None = None
 
     # ----------------------------------------------------------------- plumbing
@@ -213,29 +215,44 @@ class GoogleProvider(BaseProvider):
 
     # ----------------------------------------------------------------------- tts
     def tts(self, req: TTSRequest) -> AudioResult:
-        model = req.model or self.default_tts_model or TTS_MODELS[0]
         voice = req.voice
-        sample_rate = req.sample_rate or voice.sample_rate or DEFAULT_SAMPLE_RATE
-        if sample_rate not in SUPPORTED_SAMPLE_RATES:
-            rates = ", ".join(str(r) for r in sorted(SUPPORTED_SAMPLE_RATES, reverse=True))
-            raise ConfigError(f"google tts sample_rate must be one of {rates}, got {sample_rate}")
         if not voice.provider_voice:
             raise ConfigError("google tts needs a voice (e.g. Kore) or a custom voice id")
-
+        model, sample_rate = self._check_tts(
+            req.model,
+            custom_voice=is_custom_voice(voice.provider_voice),
+            sample_rate=req.sample_rate or voice.sample_rate,
+        )
         preview = model == PREVIEW_TTS_MODEL
-        if preview:
-            if is_custom_voice(voice.provider_voice):
-                raise ConfigError(
-                    f"{PREVIEW_TTS_MODEL} does not support custom voices; "
-                    f"use {TTS_MODELS[0]} or {TTS_MODELS[1]}"
-                )
-            if sample_rate != DEFAULT_SAMPLE_RATE:
-                raise ConfigError(f"{PREVIEW_TTS_MODEL} only outputs {DEFAULT_SAMPLE_RATE} Hz")
-
         payload = self._tts_payload(req, model, sample_rate, preview=preview)
         interaction = self._call("tts", self._client.interactions.create, **payload)
         data = self._extract_audio(interaction)
         return self._shape_audio(data, req.output_format, sample_rate)
+
+    def validate_tts(
+        self, *, model: str | None, custom_voice: bool, sample_rate: int | None
+    ) -> None:
+        """Same model / sample-rate checks as `tts`, run before a custom voice is created."""
+        self._check_tts(model, custom_voice=custom_voice, sample_rate=sample_rate)
+
+    def _check_tts(
+        self, model: str | None, *, custom_voice: bool, sample_rate: int | None
+    ) -> tuple[str, int]:
+        """Validate and return the effective `(model, sample_rate)`; `ConfigError` if invalid."""
+        effective_model = model or self.default_tts_model or TTS_MODELS[0]
+        rate = sample_rate or DEFAULT_SAMPLE_RATE
+        if rate not in SUPPORTED_SAMPLE_RATES:
+            rates = ", ".join(str(r) for r in sorted(SUPPORTED_SAMPLE_RATES, reverse=True))
+            raise ConfigError(f"google tts sample_rate must be one of {rates}, got {rate}")
+        if effective_model == PREVIEW_TTS_MODEL:
+            if custom_voice:
+                raise ConfigError(
+                    f"{PREVIEW_TTS_MODEL} does not support custom voices; "
+                    f"use {TTS_MODELS[0]} or {TTS_MODELS[1]}"
+                )
+            if rate != DEFAULT_SAMPLE_RATE:
+                raise ConfigError(f"{PREVIEW_TTS_MODEL} only outputs {DEFAULT_SAMPLE_RATE} Hz")
+        return effective_model, rate
 
     def _tts_payload(
         self, req: TTSRequest, model: str, sample_rate: int, *, preview: bool
@@ -344,9 +361,12 @@ class GoogleProvider(BaseProvider):
                     f"voice '{cfg.name}': google voice replication needs a consent recording; "
                     "set consent_audio in the voice config to its path"
                 )
+            source, consent_path = Path(cfg.reference_audio), Path(str(consent))
+            check_audio_file(source, voice=cfg.name, field="reference_audio")
+            check_audio_file(consent_path, voice=cfg.name, field="consent_audio")
             voice["replicated"] = {
-                "source_audio": self._audio_data(Path(cfg.reference_audio)),
-                "consent_audio": self._audio_data(Path(str(consent))),
+                "source_audio": self._audio_data(source),
+                "consent_audio": self._audio_data(consent_path),
             }
         else:
             raise ConfigError(f"voice '{cfg.name}' is prebuilt; nothing to create")

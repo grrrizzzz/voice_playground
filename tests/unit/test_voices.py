@@ -158,7 +158,7 @@ def test_committed_clone_example_is_valid_but_not_loaded(voices_dir: Path) -> No
 def test_config_hash_stable_and_ignores_per_request_fields() -> None:
     base = DesignedVoiceConfig(name="s", provider="google", description="warm")
     same = DesignedVoiceConfig(
-        name="s", provider="google", description="warm", style="loud", model="m", language="fr"
+        name="s", provider="google", description="warm", style="loud", sample_rate=16000
     )
     assert config_hash(base) == config_hash(same)
     assert len(config_hash(base)) == 64
@@ -168,6 +168,68 @@ def test_config_hash_stable_and_ignores_per_request_fields() -> None:
         DesignedVoiceConfig(name="s", provider="google", description="warm", store=False),
     ):
         assert config_hash(changed) != config_hash(base)
+
+
+# M1: every field a provider sends when creating the voice must invalidate the cache.
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"model": "gemini-3.8-flash-lite-tts"},
+        {"language": "en-GB"},
+        {"provider_options": {"gender": "female"}},
+        {"provider_options": {"accent": "british"}},
+        {"provider_options": {"design_model_id": "eleven_ttv_v3"}},
+        {"provider_options": {"remove_background_noise": True}},
+    ],
+)
+def test_config_hash_tracks_creation_fields_designed(change: dict[str, object]) -> None:
+    base = DesignedVoiceConfig(name="s", provider="google", description="warm")
+    changed = base.model_copy(update=change)
+    assert config_hash(changed) != config_hash(base)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"model": "gemini-3.8-flash-lite-tts"},
+        {"language": "en-GB"},
+        {"provider_options": {"remove_background_noise": True}},
+        {"provider_options": {"consent_audio": "other.wav"}},
+    ],
+)
+def test_config_hash_tracks_creation_fields_cloned(
+    tmp_path: Path, change: dict[str, object]
+) -> None:
+    (tmp_path / "me.wav").write_bytes(b"ref")
+    base = ClonedVoiceConfig(name="c", provider="google", reference_audio=Path("me.wav"))
+    changed = base.model_copy(update=change)
+    assert config_hash(changed, root=tmp_path) != config_hash(base, root=tmp_path)
+
+
+def test_config_hash_provider_options_order_independent() -> None:
+    a = DesignedVoiceConfig(
+        name="s", provider="google", description="w", provider_options={"a": 1, "b": 2}
+    )
+    b = DesignedVoiceConfig(
+        name="s", provider="google", description="w", provider_options={"b": 2, "a": 1}
+    )
+    assert config_hash(a) == config_hash(b)
+
+
+def test_resolve_designed_language_edit_makes_cache_stale(
+    voices_dir: Path, cache: VoiceCache, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write(voices_dir, "s", "name: s\nprovider: fake\ntype: designed\ndescription: warm\n")
+    cache.record(load_voice("s", voices_dir), "fake", CreatedVoice("old_id"))
+    write(
+        voices_dir,
+        "s",
+        "name: s\nprovider: fake\ntype: designed\ndescription: warm\nlanguage: fr-FR\n",
+    )
+    _, resolved, needs_create = resolve_voice("s", None, voices_dir=voices_dir, cache=cache)
+    assert needs_create
+    assert resolved.provider_voice == ""
+    assert "changed since it was created" in capsys.readouterr().err
 
 
 def test_config_hash_tracks_reference_audio_content(tmp_path: Path) -> None:
@@ -488,3 +550,64 @@ def test_resolve_cache_from_other_provider_recreates(voices_dir: Path, cache: Vo
         "g_id"
     )
     assert resolve_voice("d", "fake", voices_dir=voices_dir, cache=cache)[2] is True
+
+
+# --- S3: reference/consent audio must be audio files -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("reference", "consent", "field"),
+    [
+        ("secrets.txt", None, "reference_audio"),
+        ("me.wav", "id_rsa", "consent_audio"),
+        ("../.env", None, "reference_audio"),
+    ],
+)
+def test_resolve_cloned_rejects_non_audio_paths(
+    voices_dir: Path,
+    cache: VoiceCache,
+    tmp_path: Path,
+    reference: str,
+    consent: str | None,
+    field: str,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in (reference, consent):
+        if name is not None:
+            (root / name).write_bytes(b"not audio")  # "../.env" lands in tmp_path
+    body = f"name: me\nprovider: fake\ntype: cloned\nreference_audio: {reference}\n"
+    if consent is not None:
+        body += f"consent_audio: {consent}\n"
+    path = write(voices_dir, "me", body)
+    with pytest.raises(ConfigError, match=f"{field} must be an audio file") as excinfo:
+        resolve_voice("me", None, voices_dir=voices_dir, cache=cache, root=root)
+    assert str(path) in str(excinfo.value)
+
+
+def test_resolve_cloned_rejects_symlink_to_non_audio(
+    voices_dir: Path, cache: VoiceCache, tmp_path: Path
+) -> None:
+    target = tmp_path / "id_rsa"
+    target.write_bytes(b"PRIVATE KEY")
+    (tmp_path / "me.wav").symlink_to(target)
+    write(voices_dir, "me", "name: me\nprovider: fake\ntype: cloned\nreference_audio: me.wav\n")
+    with pytest.raises(ConfigError, match="reference_audio must be an audio file"):
+        resolve_voice("me", None, voices_dir=voices_dir, cache=cache, root=tmp_path)
+
+
+@pytest.mark.parametrize("suffix", [".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".webm"])
+def test_resolve_cloned_accepts_audio_outside_repo(
+    voices_dir: Path, cache: VoiceCache, tmp_path: Path, suffix: str
+) -> None:
+    elsewhere = tmp_path / "recordings" / f"ME{suffix.upper()}"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(b"audio")
+    write(
+        voices_dir,
+        "me",
+        f"name: me\nprovider: fake\ntype: cloned\nreference_audio: {elsewhere}\n",
+    )
+    provider, _, needs_create = resolve_voice("me", None, voices_dir=voices_dir, cache=cache)
+    assert provider == "fake"
+    assert needs_create
